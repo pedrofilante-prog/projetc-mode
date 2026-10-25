@@ -1,4 +1,4 @@
---// BLADE BALL AUTO PARRY - GETCONNECTIONS EDITION // --
+--// BLADE BALL AUTO PARRY - RAYCAST PREDICTION // --
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -7,20 +7,19 @@ local CoreGui = game:GetService("CoreGui")
 
 local LocalPlayer = Players.LocalPlayer
 local BallFolder = workspace:WaitForChild("Balls")
+local Camera = workspace.CurrentCamera
 
 local Config = { Enabled = false }
-local _PARRY_PATCH = { parryFunc = nil, ready = false }
+local _PARRY_PATCH = { ready = false, parryFunc = nil }
 
---// INJEÇÃO VIA GETCONNECTIONS (A MAIS SEGURA) //
+--// INJEÇÃO VIA GETCONNECTIONS //
 task.spawn(function()
     task.wait(2)
     local Remotes = ReplicatedStorage:FindFirstChild("Remotes")
     if not Remotes then return end
-    
     local ParryButtonPress = Remotes:FindFirstChild("ParryButtonPress")
     if not ParryButtonPress then return end
 
-    -- Tenta achar a função real de parry através dos eventos do botão
     local ok, conns = pcall(getconnections, ParryButtonPress.Event)
     if ok and conns then
         for _, conn in pairs(conns) do
@@ -28,27 +27,12 @@ task.spawn(function()
             if func and not isourclosure(func) then
                 _PARRY_PATCH.parryFunc = func
                 _PARRY_PATCH.ready = true
-                getgenv()._autoParryUI_Status("Ativo (Função Real)", Color3.fromRGB(0, 255, 0))
+                getgenv()._autoParryUI_Status("Ativo e Calibrado", Color3.fromRGB(0, 255, 0))
                 break
             end
         end
     end
 end)
-
---// FUNÇÃO DE DISPARO //
-function _PARRY_PATCH.fire()
-    if not _PARRY_PATCH.ready then return false end
-    
-    pcall(function()
-        -- Dispara o BindableEvent que o próprio jogo usa no botão
-        local Remotes = ReplicatedStorage:FindFirstChild("Remotes")
-        if Remotes and Remotes:FindFirstChild("ParryButtonPress") then
-            Remotes.ParryButtonPress:Fire()
-            return true
-        end
-    end)
-    return false
-end
 
 --// INTERFACE //
 local ScreenGui = Instance.new("ScreenGui")
@@ -93,10 +77,10 @@ Btn.MouseButton1Click:Connect(function()
         Btn.Text = "DESLIGAR"
         Btn.BackgroundColor3 = Color3.fromRGB(0, 150, 0)
         if _PARRY_PATCH.ready then 
-            Status.Text = "Ativo (Função Real)" 
+            Status.Text = "Ativo e Calibrado" 
             Status.TextColor3 = Color3.fromRGB(0, 255, 0) 
         else
-            Status.Text = "Falha na Injeção"
+            Status.Text = "Falha"
             Status.TextColor3 = Color3.fromRGB(255, 0, 0)
         end
     else
@@ -107,11 +91,11 @@ Btn.MouseButton1Click:Connect(function()
     end
 end)
 
---// LOOP DE DETECÇÃO //
+--// LOOP DE PREDIÇÃO (RAYCAST) //
 local lastParry = 0
 RunService.RenderStepped:Connect(function()
     if not Config.Enabled or not _PARRY_PATCH.ready then return end
-    if tick() - lastParry < 0.15 then return end
+    if tick() - lastParry < 0.2 then return end
 
     local char = LocalPlayer.Character
     local hrp = char and char:FindFirstChild("HumanoidRootPart")
@@ -119,13 +103,38 @@ RunService.RenderStepped:Connect(function()
 
     for _, ball in ipairs(BallFolder:GetChildren()) do
         if ball:GetAttribute("realBall") or ball:FindFirstChild("zoomies") then
-            local dist = (ball.Position - hrp.Position).Magnitude
-            local vel = ball.AssemblyLinearVelocity
-            if dist <= 25 and vel.Magnitude > 10 then
-                local dot = vel.Unit:Dot((hrp.Position - ball.Position).Unit)
-                if dot > 0 then
-                    _PARRY_PATCH.fire()
-                    lastParry = tick()
+            local ballPos = ball.Position
+            local ballVel = ball.AssemblyLinearVelocity
+            
+            -- Só tenta se a bola estiver vindo pra você (Dot > 0)
+            local direction = (hrp.Position - ballPos).Unit
+            local dot = ballVel.Unit:Dot(direction)
+
+            if dot > 0.3 and ballVel.Magnitude > 10 then
+                local dist = (hrp.Position - ballPos).Magnitude
+
+                -- Predição da distância futura
+                if dist <= 35 then
+                    -- Faz um Raycast da bola até o jogador pra ver se tem parede no meio
+                    local params = RaycastParams.new()
+                    params.FilterDescendantsInstances = {char, ball}
+                    params.FilterType = Enum.RaycastFilterType.Exclude
+                    
+                    local rayResult = workspace:Raycast(ballPos, ballVel * 0.2, params)
+                    
+                    -- Se o Raycast não bater em nada (tem visão limpa), ou se estiver perto o suficiente:
+                    if not rayResult or dist <= 15 then
+                        -- Adiciona um delay baseado na distância/velocidade pra dar o timing perfeito
+                        local timeToReach = dist / (ballVel.Magnitude or 1)
+                        task.delay(math.max(0, timeToReach - 0.1), function()
+                            if Config.Enabled then
+                                pcall(function()
+                                    _PARRY_PATCH.parryFunc() -- Chama a função real do jogo
+                                end)
+                            end
+                        end)
+                        lastParry = tick()
+                    end
                 end
             end
         end
