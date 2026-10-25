@@ -1,4 +1,4 @@
---// BLADE BALL AUTO PARRY - AZURE BYPASS // --
+--// BLADE BALL AUTO PARRY - FORCE INJECTION // --
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -10,7 +10,6 @@ local BallFolder = workspace:WaitForChild("Balls")
 
 local Config = { Enabled = false }
 
---// BYPASS DO AZURE //
 local _PARRY_PATCH = {
     keyTable = nil,
     transformFn = nil,
@@ -19,62 +18,33 @@ local _PARRY_PATCH = {
     ready = false,
 }
 
-local replicated_storage = cloneref(game:GetService('ReplicatedStorage'))
-local workspace_clone = cloneref(game:GetService('Workspace'))
-
-local _reverted = {}
-local _original = {}
-
-local function _is_valid(args)
-    return #args == 8 and type(args[2]) == "string" and type(args[3]) == "string" and type(args[4]) == "number" and typeof(args[5]) == "CFrame" and type(args[6]) == "table" and type(args[7]) == "table" and type(args[8]) == "boolean"
-end
-
-local function _hook(remote)
-    if not _reverted[remote] then
-        if not _original[getrawmetatable(remote)] then
-            _original[getrawmetatable(remote)] = true
-            local _meta = getrawmetatable(remote)
-            setreadonly(_meta, false)
-
-            local _old = _meta.__index
-            _meta.__index = function(self, key)
-                if (key == 'FireServer' and self:IsA('RemoteEvent')) or
-                   (key == 'InvokeServer' and self:IsA('RemoteFunction')) then
-                    return function(_, ...)
-                        local _arguments = {...}
-                        if _is_valid(_arguments) then
-                            if not _reverted[self] then
-                                _reverted[self] = _arguments
-                                _PARRY_PATCH.ready = true
-                                _PARRY_PATCH.parryRemote = self
-                                if getgenv()._autoParryUI_Status then
-                                    getgenv()._autoParryUI_Status("Ativo e Protegido", Color3.fromRGB(0, 255, 0))
-                                end
-                            end
-                        end
-                        return _old(self, key)(_, unpack(_arguments))
-                    end
-                end
-                return _old(self, key)
+--// CAPTURA DIRETA (SEM METATABLE) //
+local oldNamecall
+oldNamecall = hookmetamethod(game, "__namecall", function(self, ...)
+    local method = getnamecallmethod()
+    local args = {...}
+    
+    if method == "FireServer" and typeof(self) == "Instance" and self:IsA("RemoteEvent") then
+        -- Verifica se o remote enviado tem os 8 argumentos do parry
+        if #args == 8 and type(args[2]) == "string" and type(args[4]) == "number" and typeof(args[5]) == "CFrame" then
+            if not _PARRY_PATCH.parryRemote then
+                _PARRY_PATCH.parryRemote = self
+                _PARRY_PATCH.parryHash = args[1]
+                getgenv()._autoParryUI_Status("Remote Capturado!", Color3.fromRGB(255, 200, 0))
             end
-            setreadonly(_meta, true)
         end
     end
-end
+    return oldNamecall(self, ...)
+end)
 
-for _, remote in pairs(replicated_storage:GetDescendants()) do
-    if remote:IsA('RemoteEvent') or remote:IsA('RemoteFunction') then
-        _hook(remote)
-    end
-end
-
---// TENTATIVA DE PEGAR A KEY (FALLBACK) //
+--// FORÇAR LEITURA DA KEYTABLE (TENTATIVA DIRETA) //
 task.spawn(function()
-    pcall(function()
-        local Controllers = replicated_storage:WaitForChild("Controllers", 10)
+    task.wait(2)
+    local ok, err = pcall(function()
+        local Controllers = ReplicatedStorage:WaitForChild("Controllers", 10)
         local SC
         for _, child in ipairs(Controllers:GetChildren()) do
-            if child.Name:sub(1, 16) == "SwordsController" then SC = child break end
+            if child.Name:find("SwordsController") then SC = child break end
         end
         if not SC then return end
         
@@ -89,16 +59,29 @@ task.spawn(function()
         if ups and #ups >= 8 then
             _PARRY_PATCH.keyTable    = ups[3]
             _PARRY_PATCH.transformFn = ups[4]
-            _PARRY_PATCH.parryHash   = ups[8]
+            _PARRY_PATCH.parryHash   = ups[8] or _PARRY_PATCH.parryHash
+            getgenv()._autoParryUI_Status("Ativo e Protegido", Color3.fromRGB(0, 255, 0))
+        else
+            getgenv()._autoParryUI_Status("Args Capturados (Sem Key)", Color3.fromRGB(255, 150, 0))
         end
     end)
 end)
 
 function _PARRY_PATCH.fire()
-    if not _PARRY_PATCH.ready then return false end
-    local kt = _PARRY_PATCH.keyTable
-    if not kt then return false end
+    if not _PARRY_PATCH.ready and not _PARRY_PATCH.parryRemote then return false end
     
+    -- Se a KeyTable não existe, dispara o remote direto (pode ou não funcionar no servidor)
+    if not _PARRY_PATCH.keyTable then
+        pcall(function()
+            _PARRY_PATCH.parryRemote:FireServer(
+                _PARRY_PATCH.parryHash, "Key", "Token", 0.5,
+                CFrame.new(), {}, Vector2.new(0,0), false
+            )
+        end)
+        return true
+    end
+
+    local kt = _PARRY_PATCH.keyTable
     local keyIndex = kt[1]
     local currentKey = kt[2] and kt[2][keyIndex]
     if not currentKey then return false end
@@ -109,7 +92,7 @@ function _PARRY_PATCH.fire()
         if not tok or not transformed then return false end
     end
 
-    local serverTime = workspace_clone:GetServerTimeNow() * 100
+    local serverTime = workspace:GetServerTimeNow() * 100
     local timeStr = tostring(math.floor(serverTime))
     local tc = {}
     for i = 1, #timeStr do
@@ -171,14 +154,14 @@ Btn.MouseButton1Click:Connect(function()
     if Config.Enabled then
         Btn.Text = "DESLIGAR"
         Btn.BackgroundColor3 = Color3.fromRGB(0, 150, 0)
-        if _PARRY_PATCH.ready and _PARRY_PATCH.keyTable then 
+        if _PARRY_PATCH.ready then 
             Status.Text = "Ativo e Protegido" 
             Status.TextColor3 = Color3.fromRGB(0, 255, 0) 
-        elseif _PARRY_PATCH.ready then
-            Status.Text = "Capturado (Aguardando Key)"
-            Status.TextColor3 = Color3.fromRGB(255, 200, 0)
+        elseif _PARRY_PATCH.parryRemote then
+            Status.Text = "Remote OK (Sem Key)"
+            Status.TextColor3 = Color3.fromRGB(255, 150, 0)
         else
-            Status.Text = "Aguardando Parry Manual..."
+            Status.Text = "Aguardando Captura..."
             Status.TextColor3 = Color3.fromRGB(200, 200, 0)
         end
     else
@@ -192,7 +175,7 @@ end)
 --// LOOP DE DETECÇÃO //
 local lastParry = 0
 RunService.RenderStepped:Connect(function()
-    if not Config.Enabled or not _PARRY_PATCH.ready then return end
+    if not Config.Enabled then return end
     if tick() - lastParry < 0.15 then return end
 
     local char = LocalPlayer.Character
@@ -206,8 +189,10 @@ RunService.RenderStepped:Connect(function()
             if dist <= 25 and vel.Magnitude > 10 then
                 local dot = vel.Unit:Dot((hrp.Position - ball.Position).Unit)
                 if dot > 0 then
-                    _PARRY_PATCH.fire()
-                    lastParry = tick()
+                    if _PARRY_PATCH.parryRemote then
+                        _PARRY_PATCH.fire()
+                        lastParry = tick()
+                    end
                 end
             end
         end
