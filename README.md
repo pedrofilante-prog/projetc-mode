@@ -1,0 +1,2 @@
+# projetc-mode
+uau
