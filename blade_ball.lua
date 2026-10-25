@@ -57,7 +57,7 @@ local function executeParry()
         return
     end
 
-    -- Senão, tenta o Bindable Event (que o Qwen acertou em usar)
+    -- Senão, tenta o Bindable Event
     if Settings.UseBindableFirst and ParryButtonPress then
         pcall(function()
             if firesignal then
@@ -81,9 +81,8 @@ RunService.RenderStepped:Connect(function(dt)
     local dist = (ball.Position - hrp.Position).Magnitude
     local closingSpeed = speed
 
-    -- Se o CachedArgs não existir ainda, avisa no console uma vez
+    -- Se o CachedArgs não existir ainda, avisa no console uma vez (ou não)
     if not CachedArgs then
-        print("[V] AVISO: Dê um parry MANUAL uma vez para o script aprender os argumentos!")
         return
     end
 
