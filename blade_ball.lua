@@ -1,5 +1,5 @@
--- ==== AUTO PARRY v3 - PHANTOM 1099 ====
--- ==== RANGE LOCK | UI CLICK-SAFE | YUB-X ====
+-- ==== TRIGGERBOT v4 - PHANTOM 1099 ====
+-- ==== REACAO PURA | BANDA DE LATENCIA | BURST FIRE ====
 
 local cloneref = cloneref or function(obj) return obj end
 local gethui = gethui or function() return nil end
@@ -13,43 +13,42 @@ local Workspace = cloneref(game:GetService("Workspace"))
 local LocalPlayer = Players.LocalPlayer
 local Camera = Workspace.CurrentCamera
 
+local CONFIG = {
+    ParryRange = 14,     -- alcance da espada no server. - e + ajustam
+    PingComp = 1.0,      -- multiplicador do lead. [ e ] ajustam
+    BurstCount = 3,      -- cliques por rajada
+    BurstGap = 0.07,     -- intervalo entre cliques da rajada
+    Lockout = 0.42,      -- pausa apos rajada
+    KillGuard = 5,       -- bola ja colou = clique de panico
+    PromoteDot = 0.60,   -- promocao de alvo por trajetoria
+    SpamInterval = 0.14,
+}
+
 local Settings = {
-    AutoParry = false,
+    Trigger = false,
     AutoSpam = false,
     ShowAura = false,
 }
 
-local CONFIG = {
-    ParryRange = 14,        -- alcance da espada. - e + ajustam
-    RangeMin = 6,
-    RangeMax = 30,
-    ClickMin = 0.10,        -- intervalo min entre cliques na range
-    ClickMax = 0.16,        -- intervalo max (humaniza)
-    StopClosing = -5,       -- bola indo embora = para de clicar
-    SpamInterval = 0.14,    -- auto spam seco
-    PromoteDot = 0.70,      -- promocao de alvo por trajetoria
-}
-
 local State = {
-    LastClickTime = 0,
-    NextClickDelay = 0.12,
-    ActiveBall = nil,
-    LastPosition = Vector3.zero,
-    PrevDistance = 0,
-    SmoothedClosing = 0,
-    LastTick = os.clock(),
-    Clicks = 0,
+    Attempts = 0,
     Confirms = 0,
+    LastBurstStart = -10,
+    BurstToken = 0,
+    PingCache = 0.06,
+    PingTimer = 0,
     MainConnection = nil,
-    ScreenGuiInstance = nil,
+    ScreenGui = nil,
     MainFrame = nil,
     Indicator = nil,
     AuraDrawing = nil,
     LastDispatch = "init",
-    LastGate = "--",
+    LastBand = "--",
+    LastDist = 0,
+    LastCS = 0,
 }
 
--- ==== CONFIRMACAO DE PARRY ====
+-- ==== CONFIRMACAO ====
 pcall(function()
     local Remotes = game:GetService("ReplicatedStorage"):WaitForChild("Remotes", 10)
     local ps = Remotes:FindFirstChild("ParrySuccess")
@@ -62,7 +61,16 @@ pcall(function()
     end
 end)
 
--- ==== DISPATCH (MOUSE PRIMEIRO) ====
+-- ==== PING CACHEADO (nao chama Stats todo frame) ====
+local function UpdatePing(now)
+    if now - State.PingTimer < 0.3 then return end
+    State.PingTimer = now
+    pcall(function()
+        State.PingCache = Stats.Network.ServerStatsItem["Data Ping"]:GetValue() / 1000
+    end)
+end
+
+-- ==== DISPATCH (MOUSE PRIMEIRO, PROVADO NO YUB-X) ====
 local function SendParryInput()
     if mouse1click then
         pcall(mouse1click)
@@ -88,15 +96,22 @@ local function SendParryInput()
     return false
 end
 
-local function DoClick()
-    if SendParryInput() then
-        State.Clicks = State.Clicks + 1
-    end
-    State.LastClickTime = os.clock()
-    State.NextClickDelay = CONFIG.ClickMin + math.random() * (CONFIG.ClickMax - CONFIG.ClickMin)
+-- ==== BURST FIRE ====
+local function FireBurst()
+    State.LastBurstStart = os.clock()
+    State.Attempts = State.Attempts + 1
+    State.BurstToken = State.BurstToken + 1
+    local token = State.BurstToken
+    task.spawn(function()
+        for i = 1, CONFIG.BurstCount do
+            if State.BurstToken ~= token then break end
+            SendParryInput()
+            if i < CONFIG.BurstCount then task.wait(CONFIG.BurstGap) end
+        end
+    end)
 end
 
--- ==== DETECCAO DE BOLA ====
+-- ==== DETECCAO ENXUTA ====
 local function ResolveBasePart(inst)
     if inst:IsA("BasePart") then return inst end
     if inst:IsA("Model") then
@@ -116,36 +131,38 @@ local function IsCharacter(inst)
     return false
 end
 
-local function GetBallAttr(ball, attrName)
-    local val = ball:GetAttribute(attrName)
-    if val ~= nil then return val end
-    if ball.Parent then val = ball.Parent:GetAttribute(attrName) end
-    return val
+local function GetTargetAttr(ball)
+    for _, attr in ipairs({"target", "Target", "TargetPlayer"}) do
+        local val = ball:GetAttribute(attr)
+        if val == nil and ball.Parent then val = ball.Parent:GetAttribute(attr) end
+        if val ~= nil and val ~= "" then return val end
+    end
+    return nil
 end
 
-local function CheckTargetByAttr(ball)
-    for _, attr in ipairs({"target", "Target", "TargetPlayer"}) do
-        local val = GetBallAttr(ball, attr)
-        if val ~= nil and val ~= "" then
-            if typeof(val) == "Instance" then
-                if val == LocalPlayer or val == LocalPlayer.Character then return true end
-                if LocalPlayer.Character and val:IsDescendantOf(LocalPlayer.Character) then return true end
-                return false
-            end
-            local s = tostring(val)
-            if s == LocalPlayer.Name or s == LocalPlayer.DisplayName or s == tostring(LocalPlayer.UserId) then
-                return true
-            end
-            return false
-        end
+local function IsTargetMe(ball)
+    local val = GetTargetAttr(ball)
+    if val == nil then return nil end
+    if typeof(val) == "Instance" then
+        if val == LocalPlayer or val == LocalPlayer.Character then return true end
+        if LocalPlayer.Character and val:IsDescendantOf(LocalPlayer.Character) then return true end
+        return false
+    end
+    local s = tostring(val)
+    if s == LocalPlayer.Name or s == LocalPlayer.DisplayName or s == tostring(LocalPlayer.UserId) then
+        return true
     end
     return false
 end
 
-local function GetActiveBall(root)
+local function GetThreatBall(root)
     local candidates, seen = {}, {}
-    for _, folderName in ipairs({"Balls", "TrainingBalls", "Training"}) do
-        local folder = Workspace:FindFirstChild(folderName)
+    local folders = {
+        Workspace:FindFirstChild("Balls"),
+        Workspace:FindFirstChild("TrainingBalls"),
+        Workspace:FindFirstChild("Training"),
+    }
+    for _, folder in ipairs(folders) do
         if folder then
             for _, child in ipairs(folder:GetChildren()) do
                 if not IsCharacter(child) then
@@ -160,17 +177,21 @@ local function GetActiveBall(root)
     end
     if #candidates == 0 then return nil, false end
 
+    -- 1: alvo confirmado por atributo
     for _, ball in ipairs(candidates) do
-        if CheckTargetByAttr(ball) then return ball, true end
+        if IsTargetMe(ball) == true then return ball, true end
     end
 
+    -- 2: trajetoria apontando pra mim (triggerbot promove rapido)
     local bestBall, bestScore = nil, -1
     for _, ball in ipairs(candidates) do
-        local spd = ball.AssemblyLinearVelocity.Magnitude
-        if spd > 5 then
-            local dist = (ball.Position - root.Position).Magnitude
-            if dist < 80 then
-                local dot = ball.AssemblyLinearVelocity.Unit:Dot((root.Position - ball.Position).Unit)
+        local vel = ball.AssemblyLinearVelocity
+        local spd = vel.Magnitude
+        if spd > 15 then
+            local toMe = root.Position - ball.Position
+            local dist = toMe.Magnitude
+            if dist < 70 then
+                local dot = vel.Unit:Dot(toMe.Unit)
                 if dot > CONFIG.PromoteDot then
                     local score = dot * spd / math.max(dist, 1)
                     if score > bestScore then
@@ -183,6 +204,7 @@ local function GetActiveBall(root)
     end
     if bestBall then return bestBall, true end
 
+    -- 3: mais proxima (fallback)
     local closest, closestDist = nil, math.huge
     for _, ball in ipairs(candidates) do
         local dist = (ball.Position - root.Position).Magnitude
@@ -203,19 +225,17 @@ local function CreateUI()
     end
 
     local ScreenGui = Instance.new("ScreenGui")
-    ScreenGui.Name = "phantomv3"
+    ScreenGui.Name = "phantomv4"
     ScreenGui.ResetOnSpawn = false
     ScreenGui.IgnoreGuiInset = true
     if syn and syn.protect_gui then pcall(syn.protect_gui, ScreenGui) end
     ScreenGui.Parent = secureParent
-    State.ScreenGuiInstance = ScreenGui
+    State.ScreenGui = ScreenGui
 
-    -- Indicador de canto (NAO captura clique: Active = false)
     local indicator = Instance.new("TextLabel")
-    indicator.Name = "indicator"
     indicator.AnchorPoint = Vector2.new(1, 1)
     indicator.Position = UDim2.new(1, -8, 1, -8)
-    indicator.Size = UDim2.new(0, 210, 0, 46)
+    indicator.Size = UDim2.new(0, 235, 0, 46)
     indicator.BackgroundColor3 = Color3.fromRGB(10, 10, 14)
     indicator.BackgroundTransparency = 0.35
     indicator.BorderSizePixel = 0
@@ -225,13 +245,13 @@ local function CreateUI()
     indicator.TextXAlignment = Enum.TextXAlignment.Left
     indicator.TextWrapped = true
     indicator.Active = false
-    indicator.Text = "v3 | OFF | RNG 14\nCLK 0 | CONF 0 | TAXA --"
+    indicator.Text = "TRIG v4 | OFF | R14 C1.0\nAGUARDANDO BOLA..."
     indicator.Parent = ScreenGui
     State.Indicator = indicator
     Instance.new("UICorner", indicator).CornerRadius = UDim.new(0, 4)
 
     local MainFrame = Instance.new("Frame")
-    MainFrame.Size = UDim2.new(0, 230, 0, 260)
+    MainFrame.Size = UDim2.new(0, 240, 0, 250)
     MainFrame.Position = UDim2.new(0.04, 0, 0.30, 0)
     MainFrame.BackgroundColor3 = Color3.fromRGB(15, 15, 20)
     MainFrame.BorderSizePixel = 0
@@ -239,8 +259,7 @@ local function CreateUI()
     MainFrame.Parent = ScreenGui
     State.MainFrame = MainFrame
     Instance.new("UICorner", MainFrame).CornerRadius = UDim.new(0, 6)
-    local stroke = Instance.new("UIStroke", MainFrame)
-    stroke.Color = Color3.fromRGB(40, 40, 52)
+    Instance.new("UIStroke", MainFrame).Color = Color3.fromRGB(40, 40, 52)
 
     local TitleBar = Instance.new("Frame")
     TitleBar.Size = UDim2.new(1, 0, 0, 30)
@@ -253,7 +272,7 @@ local function CreateUI()
     TitleText.Size = UDim2.new(1, -10, 1, 0)
     TitleText.Position = UDim2.new(0, 10, 0, 0)
     TitleText.BackgroundTransparency = 1
-    TitleText.Text = "PHANTOM v3 | P = mostrar/ocultar"
+    TitleText.Text = "TRIGGERBOT v4 | P = menu"
     TitleText.TextColor3 = Color3.fromRGB(215, 215, 225)
     TitleText.TextSize = 10
     TitleText.Font = Enum.Font.GothamBold
@@ -287,9 +306,9 @@ local function CreateUI()
     layout.Padding = UDim.new(0, 5)
     layout.SortOrder = Enum.SortOrder.LayoutOrder
 
-    local function SetUIVisible(visible)
-        MainFrame.Visible = visible
-        MainFrame.Active = visible
+    local function SetUIVisible(v)
+        MainFrame.Visible = v
+        MainFrame.Active = v
     end
 
     local function CreateButton(order, text, defaultState, callback)
@@ -312,29 +331,28 @@ local function CreateUI()
             btn.Text = string.format("%s: %s", text, active and "[ON]" or "[OFF]")
             callback(active)
         end)
-        return btn
     end
 
-    CreateButton(1, "Auto Parry", false, function(v)
-        Settings.AutoParry = v
-        if v then
-            SetUIVisible(false) -- esconde: clique simulado nao come botao
-        end
+    CreateButton(1, "TriggerBot", false, function(v)
+        Settings.Trigger = v
+        if v then SetUIVisible(false) end
     end)
     CreateButton(2, "Auto Spam", false, function(v) Settings.AutoSpam = v end)
     CreateButton(3, "Visual Aura", false, function(v) Settings.ShowAura = v end)
 
-    local rangeLabel = Instance.new("TextLabel")
-    rangeLabel.LayoutOrder = 4
-    rangeLabel.Size = UDim2.new(1, 0, 0, 24)
-    rangeLabel.BackgroundColor3 = Color3.fromRGB(20, 22, 28)
-    rangeLabel.BorderSizePixel = 0
-    rangeLabel.Font = Enum.Font.Code
-    rangeLabel.TextSize = 10
-    rangeLabel.TextColor3 = Color3.fromRGB(140, 200, 255)
-    rangeLabel.Text = "RANGE: 14  (teclas - e +)"
-    rangeLabel.Parent = Container
-    Instance.new("UICorner", rangeLabel).CornerRadius = UDim.new(0, 4)
+    local infoLabel = Instance.new("TextLabel")
+    infoLabel.LayoutOrder = 4
+    infoLabel.Size = UDim2.new(1, 0, 0, 36)
+    infoLabel.BackgroundColor3 = Color3.fromRGB(20, 22, 28)
+    infoLabel.BorderSizePixel = 0
+    infoLabel.Font = Enum.Font.Code
+    infoLabel.TextSize = 10
+    infoLabel.TextColor3 = Color3.fromRGB(140, 200, 255)
+    infoLabel.TextWrapped = true
+    infoLabel.TextXAlignment = Enum.TextXAlignment.Left
+    infoLabel.Text = "RANGE 14 (- e +)\nCOMP 1.0 ([ e ])"
+    infoLabel.Parent = Container
+    Instance.new("UICorner", infoLabel).CornerRadius = UDim.new(0, 4)
 
     local killBtn = Instance.new("TextButton")
     killBtn.LayoutOrder = 9
@@ -350,21 +368,27 @@ local function CreateUI()
     Instance.new("UICorner", killBtn).CornerRadius = UDim.new(0, 4)
     killBtn.MouseButton1Click:Connect(function()
         if State.MainConnection then State.MainConnection:Disconnect() State.MainConnection = nil end
+        State.BurstToken = State.BurstToken + 1
         if State.AuraDrawing then pcall(function() State.AuraDrawing:Remove() end) State.AuraDrawing = nil end
-        if State.ScreenGuiInstance then State.ScreenGuiInstance:Destroy() State.ScreenGuiInstance = nil end
+        if State.ScreenGui then State.ScreenGui:Destroy() State.ScreenGui = nil end
     end)
 
-    -- Teclas: P mostra/esconde | - e + ajustam range
     UserInputService.InputBegan:Connect(function(input, processed)
         if processed then return end
         if input.KeyCode == Enum.KeyCode.P then
             SetUIVisible(not MainFrame.Visible)
         elseif input.KeyCode == Enum.KeyCode.Minus or input.KeyCode == Enum.KeyCode.KeypadMinus then
-            CONFIG.ParryRange = math.clamp(CONFIG.ParryRange - 1, CONFIG.RangeMin, CONFIG.RangeMax)
-            rangeLabel.Text = "RANGE: " .. CONFIG.ParryRange .. "  (teclas - e +)"
+            CONFIG.ParryRange = math.clamp(CONFIG.ParryRange - 1, 6, 30)
+            infoLabel.Text = string.format("RANGE %d (- e +)\nCOMP %.1f ([ e ])", CONFIG.ParryRange, CONFIG.PingComp)
         elseif input.KeyCode == Enum.KeyCode.Equal or input.KeyCode == Enum.KeyCode.KeypadPlus then
-            CONFIG.ParryRange = math.clamp(CONFIG.ParryRange + 1, CONFIG.RangeMin, CONFIG.RangeMax)
-            rangeLabel.Text = "RANGE: " .. CONFIG.ParryRange .. "  (teclas - e +)"
+            CONFIG.ParryRange = math.clamp(CONFIG.ParryRange + 1, 6, 30)
+            infoLabel.Text = string.format("RANGE %d (- e +)\nCOMP %.1f ([ e ])", CONFIG.ParryRange, CONFIG.PingComp)
+        elseif input.KeyCode == Enum.KeyCode.LeftBracket then
+            CONFIG.PingComp = math.clamp(CONFIG.PingComp - 0.1, 0.4, 2.0)
+            infoLabel.Text = string.format("RANGE %d (- e +)\nCOMP %.1f ([ e ])", CONFIG.ParryRange, CONFIG.PingComp)
+        elseif input.KeyCode == Enum.KeyCode.RightBracket then
+            CONFIG.PingComp = math.clamp(CONFIG.PingComp + 0.1, 0.4, 2.0)
+            infoLabel.Text = string.format("RANGE %d (- e +)\nCOMP %.1f ([ e ])", CONFIG.ParryRange, CONFIG.PingComp)
         end
     end)
 end
@@ -384,128 +408,101 @@ pcall(function()
     end
 end)
 
--- ==== LOOP PRINCIPAL ====
+-- ==== LOOP TRIGGERBOT ====
 local renderEvent = RunService.PreRender or RunService.RenderStepped
 local lastSpam = 0
 
 State.MainConnection = renderEvent:Connect(function()
     local now = os.clock()
+    UpdatePing(now)
 
     if Settings.AutoSpam and (now - lastSpam) >= CONFIG.SpamInterval then
         lastSpam = now
-        DoClick()
+        SendParryInput()
     end
 
     local char = LocalPlayer.Character
     local root = char and char:FindFirstChild("HumanoidRootPart")
     if not root then return end
 
-    local ball, isTarget = GetActiveBall(root)
+    local ball, isTarget = GetThreatBall(root)
 
     if not ball then
-        State.ActiveBall = nil
-        State.SmoothedClosing = 0
-        State.LastGate = "SEM BOLA"
-    else
-        local dist = (ball.Position - root.Position).Magnitude
-        local speed = ball.AssemblyLinearVelocity.Magnitude
-
-        local dt = now - State.LastTick
-        if dt <= 0 then dt = 0.001 end
-
-        if State.ActiveBall ~= ball then
-            State.ActiveBall = ball
-            State.LastPosition = ball.Position
-            State.PrevDistance = dist
-            State.SmoothedClosing = 0
-        else
-            local rawClosing = (State.PrevDistance - dist) / dt
-            State.PrevDistance = dist
-            local alpha = math.clamp(dt * 30.0, 0.25, 0.90)
-            State.SmoothedClosing = State.SmoothedClosing * (1 - alpha) + rawClosing * alpha
-        end
-        State.LastTick = now
-
-        local closing = State.SmoothedClosing
-
-        -- promocao de alvo por trajetoria
-        if not isTarget and speed > 10 then
-            local dot = ball.AssemblyLinearVelocity.Unit:Dot((root.Position - ball.Position).Unit)
-            if dot > CONFIG.PromoteDot and dist < 50 and closing > 5 then
-                isTarget = true
-            end
-        end
-
-        -- logica central: RANGE LOCK
-        if Settings.AutoParry and isTarget then
-            if closing < CONFIG.StopClosing then
-                State.LastGate = "BOLA SAIU"
-            elseif dist <= CONFIG.ParryRange and closing > 0 then
-                if (now - State.LastClickTime) >= State.NextClickDelay then
-                    DoClick()
-                    State.LastGate = "CLICOU"
-                else
-                    State.LastGate = "NA RANGE (cd)"
-                end
-            else
-                State.LastGate = "LONGE (" .. string.format("%.1f", dist) .. ")"
-            end
-        elseif not Settings.AutoParry then
-            State.LastGate = "OFF"
-        else
-            State.LastGate = "ALVO: OUTRO"
-        end
-
-        -- aura mostra o range real
-        if State.AuraDrawing then
-            if Settings.ShowAura then
-                local sp, onScreen = Camera:WorldToViewportPoint(root.Position)
-                if onScreen and sp.Z > 0 then
-                    local edge = Camera:WorldToViewportPoint(root.Position + Camera.CFrame.RightVector * CONFIG.ParryRange)
-                    State.AuraDrawing.Position = Vector2.new(sp.X, sp.Y)
-                    State.AuraDrawing.Radius = math.clamp((Vector2.new(sp.X, sp.Y) - Vector2.new(edge.X, edge.Y)).Magnitude, 15, 900)
-                    State.AuraDrawing.Color = isTarget and Color3.fromRGB(50, 255, 120) or Color3.fromRGB(80, 180, 255)
-                    State.AuraDrawing.Visible = true
-                else
-                    State.AuraDrawing.Visible = false
-                end
-            else
-                State.AuraDrawing.Visible = false
-            end
-        end
-
-        -- telemetria de canto
         if State.Indicator then
-            local rate = State.Clicks > 0 and math.floor((State.Confirms / State.Clicks) * 100) or 0
-            State.Indicator.Text = string.format(
-                "v3 | %s | RNG %d | %s\nDIST %.1f | VEL %.0f | CS %.1f\nCLK %d | CONF %d | TAXA %d%%",
-                Settings.AutoParry and "ON" or "OFF",
-                CONFIG.ParryRange,
-                State.LastGate,
-                dist, speed, closing,
-                State.Clicks, State.Confirms, rate
-            )
-            State.Indicator.TextColor3 = Settings.AutoParry and Color3.fromRGB(120, 240, 140) or Color3.fromRGB(200, 120, 120)
+            State.Indicator.Text = string.format("TRIG v4 | %s | R%d C%.1f | PING %dms\nSEM BOLA | ATT %d | CONF %d",
+                Settings.Trigger and "ON" or "OFF", CONFIG.ParryRange, CONFIG.PingComp,
+                math.floor(State.PingCache * 1000), State.Attempts, State.Confirms)
+        end
+        return
+    end
+
+    local dist = (ball.Position - root.Position).Magnitude
+    local vel = ball.AssemblyLinearVelocity
+    local speed = vel.Magnitude
+    local closing = 0
+    if speed > 1 then
+        closing = vel.Unit:Dot((root.Position - ball.Position).Unit) * speed
+    end
+
+    -- BANDA DE LATENCIA: o coracao do triggerbot
+    local lead = speed * State.PingCache * CONFIG.PingComp
+    local bandHigh = CONFIG.ParryRange + lead
+    local bandLow = CONFIG.KillGuard + lead * 0.4
+    State.LastBand = string.format("%.0f-%.0f", bandLow, bandHigh)
+    State.LastDist = dist
+    State.LastCS = closing
+
+    local inBand = dist <= bandHigh and closing > 0
+    local panic = dist <= CONFIG.KillGuard + 4 and closing > 15
+
+    if Settings.Trigger and isTarget and (inBand or panic) then
+        if (now - State.LastBurstStart) >= CONFIG.Lockout then
+            FireBurst()
         end
     end
 
-    if State.Indicator and not ball then
-        local rate = State.Clicks > 0 and math.floor((State.Confirms / State.Clicks) * 100) or 0
-        State.Indicator.Text = string.format("v3 | %s | RNG %d | %s\nCLK %d | CONF %d | TAXA %d%%",
-            Settings.AutoParry and "ON" or "OFF", CONFIG.ParryRange, State.LastGate,
-            State.Clicks, State.Confirms, rate)
+    -- aura desenha a banda real
+    if State.AuraDrawing then
+        if Settings.ShowAura then
+            local sp, onScreen = Camera:WorldToViewportPoint(root.Position)
+            if onScreen and sp.Z > 0 then
+                local edge = Camera:WorldToViewportPoint(root.Position + Camera.CFrame.RightVector * bandHigh)
+                State.AuraDrawing.Position = Vector2.new(sp.X, sp.Y)
+                State.AuraDrawing.Radius = math.clamp((Vector2.new(sp.X, sp.Y) - Vector2.new(edge.X, edge.Y)).Magnitude, 15, 900)
+                State.AuraDrawing.Color = inBand and Color3.fromRGB(255, 80, 80) or Color3.fromRGB(50, 255, 120)
+                State.AuraDrawing.Visible = true
+            else
+                State.AuraDrawing.Visible = false
+            end
+        else
+            State.AuraDrawing.Visible = false
+        end
+    end
+
+    if State.Indicator then
+        local rate = State.Attempts > 0 and math.floor((State.Confirms / State.Attempts) * 100) or 0
+        State.Indicator.Text = string.format(
+            "TRIG v4 | %s | R%d C%.1f | PING %dms\nDIST %.1f | BANDA [%s] | CS %.0f\nATT %d | CONF %d | TAXA %d%%",
+            Settings.Trigger and "ON" or "OFF", CONFIG.ParryRange, CONFIG.PingComp,
+            math.floor(State.PingCache * 1000),
+            dist, State.LastBand, closing,
+            State.Attempts, State.Confirms, rate
+        )
+        State.Indicator.TextColor3 = inBand and Color3.fromRGB(255, 120, 120)
+            or (Settings.Trigger and Color3.fromRGB(120, 240, 140) or Color3.fromRGB(200, 120, 120))
     end
 end)
 
 print("========================================")
-print("  AUTO PARRY v3 - PHANTOM 1099")
-print("  RANGE LOCK | UI CLICK-SAFE")
+print("  TRIGGERBOT v4 - PHANTOM 1099")
+print("  BANDA DE LATENCIA | BURST FIRE")
 print("========================================")
-print("  P      = mostrar/ocultar menu")
-print("  - / +  = diminuir/aumentar range")
-print("  TAXA no canto = CONFIRM / CLIQUES")
+print("  P       = mostrar/ocultar menu")
+print("  - / +   = range da espada")
+print("  [ / ]   = compensacao de ping")
 print("----------------------------------------")
-print("  Morre com swing no vacuo? RANGE alto demais -> baixa (-)")
-print("  Bola passa sem clique?   RANGE baixo demais -> sobe (+)")
-print("  Comece em 14, ajuste de 1 em 1.")
+print("  Morre com a bola colando?  sobe COMP (])")
+print("  Swing no vacuo?            desce COMP ([)")
+print("  Comece: RANGE 14, COMP 1.0")
+print("  TAXA = CONFIRM / RAJADAS (nao por clique)")
 print("========================================")
